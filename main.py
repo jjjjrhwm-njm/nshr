@@ -12,10 +12,14 @@ from telegram.ext import (
     ConversationHandler, CommandHandler
 )
 
-# إعداد السجلات
-logging.basicConfig(level=logging.INFO)
+# إعداد السجلات بشكل احترافي
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# --- جلب كل البيانات الحساسة من البيئة (Environment) ---
+# --- جلب البيانات الحساسة من البيئة (Environment) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
@@ -23,11 +27,9 @@ CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET")
 VERIFY_PATH = os.getenv("TIKTOK_VERIFY_PATH")
 VERIFY_CONTENT = os.getenv("TIKTOK_VERIFY_CONTENT")
 
-# رابط السيرفر الأساسي
 BASE_URL = "https://nshr-6u7f.onrender.com"
 REDIRECT_URI = f"{BASE_URL}/callback"
 
-# حالات المحادثة
 WAITING_FOR_VIDEO, WAITING_FOR_TITLE = range(2)
 
 app = Flask(__name__)
@@ -38,7 +40,6 @@ app = Flask(__name__)
 def home():
     return "Bot is secured and pulsing! 🟢"
 
-# مسار التوثيق الديناميكي (يسحب المسار والمحتوى من المتغيرات)
 @app.route(f'/{VERIFY_PATH}')
 def tiktok_verify():
     return VERIFY_CONTENT
@@ -48,20 +49,22 @@ def callback():
     code = request.args.get('code')
     if code:
         return f"<h1>✅ تم الربط!</h1><p>الكود: {code}</p>"
-    return "<h1>❌ فشل</h1>"
+    return "<h1>❌ فشل الربط</h1>"
 
 def send_pulse():
-    """دالة النبض لإبقاء السيرفر مستيقظاً"""
+    """النبض لمنع رندر من النوم (كل 10 دقائق)"""
+    time.sleep(30) # انتظار قليلاً حتى يقلع السيرفر
     while True:
         try:
             requests.get(BASE_URL)
-            logging.info("Pulse: Heartbeat sent.")
-        except: pass
-        time.sleep(600) # كل 10 دقائق
+            logger.info("Pulse: Heartbeat sent to keep server awake.")
+        except Exception as e:
+            logger.error(f"Pulse failed: {e}")
+        time.sleep(600)
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
 
 # --- الجزء الثاني: منطق البوت (التقسيم والربط) ---
 
@@ -72,21 +75,21 @@ async def login_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"&response_type=code&redirect_uri={REDIRECT_URI}"
     )
     keyboard = [[InlineKeyboardButton("🔗 ربط حساب تيك توك", url=auth_url)]]
-    await update.message.reply_text("اضغط للربط:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("اضغط على الزر لربط حسابك:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ارسل المقطع 🎬")
+    await update.message.reply_text("ارسل المقطع يا نجم الإبداع 🎬")
     return WAITING_FOR_VIDEO
 
 async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['video_file_id'] = update.message.video.file_id
     context.user_data['message_id'] = update.message.message_id
-    await update.message.reply_text("ارسل العنوان 📝")
+    await update.message.reply_text("ارسل العنوان للمقطع 📝")
     return WAITING_FOR_TITLE
 
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
-    await update.message.reply_text("جاري التقسيم...")
+    await update.message.reply_text("✅ تم الاستلام، جاري المعالجة والتقسيم...")
     
     file_id = context.user_data['video_file_id']
     msg_id = context.user_data['message_id']
@@ -108,16 +111,21 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(out, 'rb') as v:
                     await update.message.reply_video(video=v, caption=f"{title} - جـ{part_num}")
                 os.remove(out)
-        await update.message.reply_text("تم بنجاح! 🚀")
+        await update.message.reply_text("تم التقسيم بنجاح! 🚀")
     except Exception as e:
-        await update.message.reply_text(f"خطأ: {e}")
+        await update.message.reply_text(f"حدث خطأ فني: {e}")
     finally:
         if os.path.exists(input_path): os.remove(input_path)
         context.user_data.clear()
     return ConversationHandler.END
 
+# --- الحل السحري لمشكلة الـ Event Loop في الخيوط ---
 def run_bot():
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    # إنشاء حلقة أحداث جديدة خصيصاً لهذا الخيط
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^نجم نشر$"), start_publish)],
@@ -128,11 +136,16 @@ def run_bot():
         fallbacks=[]
     )
     
-    app_bot.add_handler(conv)
-    app_bot.add_handler(CommandHandler("login", login_tiktok))
-    app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
+    application.add_handler(conv)
+    application.add_handler(CommandHandler("login", login_tiktok))
+    
+    logger.info("Bot starting in its own event loop...")
+    application.run_polling(drop_pending_updates=True, stop_signals=None)
 
 if __name__ == '__main__':
+    # تشغيل النبض
     threading.Thread(target=send_pulse, daemon=True).start()
-    threading.Thread(target=run_bot).start()
+    # تشغيل البوت في خيطه الخاص مع معالجة الـ Loop
+    threading.Thread(target=run_bot, daemon=True).start()
+    # تشغيل Flask على الخيط الرئيسي
     run_flask()
