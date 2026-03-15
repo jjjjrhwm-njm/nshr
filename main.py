@@ -6,6 +6,7 @@ import threading
 import time
 import requests
 import json
+import glob
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,7 +46,7 @@ try:
         cred = credentials.Certificate(json.loads(FIREBASE_CONF))
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        logger.info("🟢 متصل بـ Firebase بنجاح! الذاكرة الدائمة جاهزة.")
+        logger.info("🟢 تم الاتصال بـ Firebase بنجاح! الذاكرة الدائمة جاهزة.")
 except Exception as e:
     logger.error(f"🔴 خطأ في Firebase: {e}")
 
@@ -85,7 +86,6 @@ def upload_to_tiktok(video_path, caption):
 
         def perform_upload(token):
             file_size = os.path.getsize(video_path)
-            # 1. تهيئة الرفع (Init)
             init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
             init_body = {
                 "post_info": {
@@ -115,7 +115,6 @@ def upload_to_tiktok(video_path, caption):
             
             upload_url = data_init["data"]["upload_url"]
             
-            # 2. الرفع الثنائي الفعلي (Binary PUT)
             with open(video_path, "rb") as f:
                 put_headers = {
                     "Content-Type": "video/mp4",
@@ -128,10 +127,7 @@ def upload_to_tiktok(video_path, caption):
             else:
                 return f"❌ فشل رفع الملف: {r_put.text}"
 
-        # المحاولة الأولى
         result = perform_upload(current_token)
-        
-        # إذا انتهت الصلاحية، جدد وحاول مرة ثانية تلقائياً
         if result == "EXPIRED" and refresh_token:
             logger.info("🔄 انتهى التوكن، جاري التجديد والمحاولة مرة أخرى...")
             new_token = refresh_tiktok_token(refresh_token)
@@ -182,7 +178,7 @@ async def login_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"&response_type=code&redirect_uri={REDIRECT_URI}"
     )
     keyboard = [[InlineKeyboardButton("🔗 ربط حساب تيك توك للمرة الأخيرة", url=auth_url)]]
-    await update.message.reply_text("هذه آخر مرة ستحتاج فيها للربط بإذن الله:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("لتفعيل الحفظ الدائم، اربط حسابك الآن:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def auth_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -219,9 +215,11 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ارسل العنوان للمقطع 📝")
     return WAITING_FOR_TITLE
 
+# --- استبدال الدالة المطلوبة بالنظام المطور لتعقب المسارات ---
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
-    status_msg = await update.message.reply_text("✅ جاري المعالجة، القص، والنشر السحابي...")
+    # تحديث الحالة للمستخدم
+    status_msg = await update.message.reply_text("📥 جاري تحميل الفيديو من تليجرام...")
     
     file_id = context.user_data['video_file_id']
     msg_id = context.user_data['message_id']
@@ -231,29 +229,34 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await new_file.download_to_drive(input_path)
     
     try:
+        await status_msg.edit_text("✂️ جاري فحص مدة الفيديو وبدء التقسيم...")
         cmd_dur = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
         duration = float(subprocess.check_output(cmd_dur, shell=True).decode().strip())
         
         for start in range(0, int(duration), 50):
             part_num = (start // 50) + 1
             out = f"part_{part_num}_{msg_id}.mp4"
+            
+            await status_msg.edit_text(f"⚙️ جاري معالجة الجزء رقم ({part_num})...")
             subprocess.run(f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {out}', shell=True)
             
             if os.path.exists(out):
                 caption = f"{title} - جـ{part_num}"
-                # 1. إرسال تليجرام
-                with open(out, 'rb') as v:
-                    await update.message.reply_video(video=v, caption=caption)
+                await update.message.reply_text(f"📤 جاري رفع الجزء {part_num} إلى تيك توك...")
                 
-                # 2. الرفع المباشر لتيك توك
+                # رفع تيك توك
                 res_tk = await asyncio.to_thread(upload_to_tiktok, out, caption)
-                await update.message.reply_text(f"📊 تيك توك (جـ{part_num}): {res_tk}")
+                
+                # إرسال تلجرام للمعاينة
+                with open(out, 'rb') as v:
+                    await update.message.reply_video(video=v, caption=f"✅ {caption}\n📊 نتيجة تيك توك: {res_tk}")
                 
                 os.remove(out)
 
-        await status_msg.edit_text("✅ تمت جميع عمليات القص والنشر السحابي بنجاح! 🚀🎬")
+        await status_msg.edit_text("✅ تمت جميع العمليات بنجاح! 🚀")
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ فني: {e}")
+        await update.message.reply_text(f"❌ حدث خطأ فني: {e}")
+        logger.error(f"Error during processing: {e}")
     finally:
         if os.path.exists(input_path): os.remove(input_path)
         context.user_data.clear()
@@ -279,10 +282,15 @@ def run_bot():
     application.add_handler(CommandHandler("login", login_tiktok))
     application.add_handler(CommandHandler("auth", auth_step))
     
-    logger.info("Bot is running...")
+    logger.info("Bot is running with drop_pending_updates=True...")
     application.run_polling(drop_pending_updates=True, stop_signals=None)
 
 if __name__ == '__main__':
+    # نظام تنظيف تلقائي عند التشغيل لحذف أي فيديوهات قديمة
+    for f in glob.glob("input_*.mp4") + glob.glob("part_*.mp4"):
+        try: os.remove(f)
+        except: pass
+    
     threading.Thread(target=send_pulse, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
     run_flask()
