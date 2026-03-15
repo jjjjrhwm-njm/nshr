@@ -18,12 +18,17 @@ ADMIN_ID = os.getenv("ADMIN_ID") # رقمك لكي يرسل لك البوت رس
 # الحالات الخاصة بالمحادثة المتسلسلة
 WAITING_FOR_VIDEO, WAITING_FOR_TITLE = range(2)
 
-# --- الجزء الأول: إرضاء سيرفر رندر (فتح بورت وهمي) ---
+# --- الجزء الأول: إرضاء سيرفر رندر + توثيق تيك توك ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot is running beautifully!"
+
+# مسار توثيق تيك توك السحري 🎯
+@app.route('/tiktok6twYohMgjNLIzC9S24nqHs3gXGwucVkL.txt')
+def tiktok_verify():
+    return "tiktok-developers-site-verification=6twYohMgjNLIzC9S24nqHs3gXGwucVkL"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
