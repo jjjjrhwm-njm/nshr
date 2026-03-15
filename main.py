@@ -1,49 +1,45 @@
 import os
+import subprocess
 import logging
-from moviepy.editor import VideoFileClip
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# إعداد السجلات
 logging.basicConfig(level=logging.INFO)
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("جاري المعالجة... 🚀")
-    input_path = "input_video.mp4"
+    status_msg = await update.message.reply_text("المعالجة السريعة بدأت... ⚡")
+    input_path = "input.mp4"
     
     try:
+        # تحميل الفيديو
         video_file = await update.message.video.get_file()
         await video_file.download_to_drive(input_path)
         
-        video = VideoFileClip(input_path)
-        duration = int(video.duration)
-        
-        for start in range(0, duration, 50):
-            end = min(start + 50, duration)
+        # معرفة مدة الفيديو باستخدام FFmpeg (أخف من MoviePy)
+        cmd_duration = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
+        duration = float(subprocess.check_output(cmd_duration, shell=True))
+
+        for start in range(0, int(duration), 50):
             output_filename = f"part_{start//50 + 1}.mp4"
             
-            clip = video.subclip(start, end)
-            clip.write_videofile(output_filename, codec="libx264", audio_codec="aac", logger=None)
+            # قص الفيديو بدون رندرة (خفيف جداً على الرام)
+            # -ss للبداية، -t للمدة، -c copy لنسخ الكوديك بدون ضغط
+            cmd_cut = f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {output_filename}'
+            subprocess.run(cmd_cut, shell=True)
             
-            with open(output_filename, 'rb') as v:
-                await update.message.reply_video(video=v, caption=f"الجزء {start//50 + 1}")
-            
-            os.remove(output_filename)
+            if os.path.exists(output_filename):
+                with open(output_filename, 'rb') as v:
+                    await update.message.reply_video(video=v, caption=f"الجزء {start//50 + 1}")
+                os.remove(output_filename)
 
-        video.close()
-        await status_msg.edit_text("تم بنجاح! ✅")
+        await status_msg.edit_text("تم التقسيم بأقل استهلاك للذاكرة! ✅")
     except Exception as e:
         await update.message.reply_text(f"خطأ: {e}")
     finally:
         if os.path.exists(input_path): os.remove(input_path)
 
 if __name__ == '__main__':
-    # بناء التطبيق بدون استخدام Updater بشكل يدوي لتفني الأخطاء
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    
-    print("✅ Bot is Starting...")
-    # تشغيل مباشر
     app.run_polling()
