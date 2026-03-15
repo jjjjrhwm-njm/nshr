@@ -3,61 +3,91 @@ import subprocess
 import logging
 import asyncio
 import threading
-from flask import Flask
-from telegram import Update
+import time
+import requests
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, MessageHandler, filters,
-    ConversationHandler
+    ConversationHandler, CommandHandler
 )
 
 # إعداد السجلات
 logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID") # رقمك لكي يرسل لك البوت رسالة التشغيل
 
-# الحالات الخاصة بالمحادثة المتسلسلة
+# --- جلب كل البيانات الحساسة من البيئة (Environment) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
+CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
+CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET")
+VERIFY_PATH = os.getenv("TIKTOK_VERIFY_PATH")
+VERIFY_CONTENT = os.getenv("TIKTOK_VERIFY_CONTENT")
+
+# رابط السيرفر الأساسي
+BASE_URL = "https://nshr-6u7f.onrender.com"
+REDIRECT_URI = f"{BASE_URL}/callback"
+
+# حالات المحادثة
 WAITING_FOR_VIDEO, WAITING_FOR_TITLE = range(2)
 
-# --- الجزء الأول: إرضاء سيرفر رندر + توثيق تيك توك ---
 app = Flask(__name__)
+
+# --- الجزء الأول: Flask (التوثيق والنبض) ---
 
 @app.route('/')
 def home():
-    return "Bot is running beautifully!"
+    return "Bot is secured and pulsing! 🟢"
 
-# مسار توثيق تيك توك السحري 🎯
-@app.route('/tiktok6twYohMgjNLIzC9S24nqHs3gXGwucVkL.txt')
+# مسار التوثيق الديناميكي (يسحب المسار والمحتوى من المتغيرات)
+@app.route(f'/{VERIFY_PATH}')
 def tiktok_verify():
-    return "tiktok-developers-site-verification=6twYohMgjNLIzC9S24nqHs3gXGwucVkL"
+    return VERIFY_CONTENT
+
+@app.route('/callback')
+def callback():
+    code = request.args.get('code')
+    if code:
+        return f"<h1>✅ تم الربط!</h1><p>الكود: {code}</p>"
+    return "<h1>❌ فشل</h1>"
+
+def send_pulse():
+    """دالة النبض لإبقاء السيرفر مستيقظاً"""
+    while True:
+        try:
+            requests.get(BASE_URL)
+            logging.info("Pulse: Heartbeat sent.")
+        except: pass
+        time.sleep(600) # كل 10 دقائق
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    # إيقاف رسائل Flask المزعجة في السجلات
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
 
-# --- الجزء الثاني: البوت الفعلي (المحادثة والتقسيم) ---
+# --- الجزء الثاني: منطق البوت (التقسيم والربط) ---
 
-# 1. عند إرسال كلمة "نجم نشر"
+async def login_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    auth_url = (
+        f"https://www.tiktok.com/v2/auth/authorize/"
+        f"?client_key={CLIENT_KEY}&scope=user.info.basic,video.upload,video.publish"
+        f"&response_type=code&redirect_uri={REDIRECT_URI}"
+    )
+    keyboard = [[InlineKeyboardButton("🔗 ربط حساب تيك توك", url=auth_url)]]
+    await update.message.reply_text("اضغط للربط:", reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ارسل المقطع 🎬")
     return WAITING_FOR_VIDEO
 
-# 2. عند استلام الفيديو
 async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # حفظ معرف الفيديو مؤقتاً في ذاكرة البوت
     context.user_data['video_file_id'] = update.message.video.file_id
     context.user_data['message_id'] = update.message.message_id
-    await update.message.reply_text("ارسل العنوان الذي تريده 📝")
+    await update.message.reply_text("ارسل العنوان 📝")
     return WAITING_FOR_TITLE
 
-# 3. عند استلام العنوان والبدء بالقص
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
-    await update.message.reply_text("تم الاستلام ✅ جاري التقسيم...")
+    await update.message.reply_text("جاري التقسيم...")
     
-    # استرجاع الفيديو من الذاكرة وتحميله
     file_id = context.user_data['video_file_id']
     msg_id = context.user_data['message_id']
     input_path = f"input_{msg_id}.mp4"
@@ -66,85 +96,43 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await new_file.download_to_drive(input_path)
     
     try:
-        # معرفة المدة باستخدام FFmpeg
-        cmd_duration = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
-        duration_bytes = subprocess.check_output(cmd_duration, shell=True)
-        duration = float(duration_bytes.decode('utf-8').strip())
+        cmd_dur = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
+        duration = float(subprocess.check_output(cmd_dur, shell=True).decode().strip())
         
-        # القص والإرسال
         for start in range(0, int(duration), 50):
             part_num = (start // 50) + 1
-            output_filename = f"part_{part_num}_{msg_id}.mp4"
+            out = f"part_{part_num}_{msg_id}.mp4"
+            subprocess.run(f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {out}', shell=True)
             
-            # أمر القص السريع بدون رندرة
-            cmd_cut = f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {output_filename}'
-            subprocess.run(cmd_cut, shell=True)
-            
-            if os.path.exists(output_filename):
-                # دمج العنوان مع رقم الجزء
-                caption = f"{title} الجزء {part_num}"
-                with open(output_filename, 'rb') as v:
-                    await update.message.reply_video(video=v, caption=caption)
-                os.remove(output_filename)
-
-        await update.message.reply_text("تم تقسيم وإرسال جميع الأجزاء بنجاح! 🚀")
-        
+            if os.path.exists(out):
+                with open(out, 'rb') as v:
+                    await update.message.reply_video(video=v, caption=f"{title} - جـ{part_num}")
+                os.remove(out)
+        await update.message.reply_text("تم بنجاح! 🚀")
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await update.message.reply_text(f"حدث خطأ أثناء المعالجة: {e}")
+        await update.message.reply_text(f"خطأ: {e}")
     finally:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        context.user_data.clear() # تفريغ الذاكرة
-        
+        if os.path.exists(input_path): os.remove(input_path)
+        context.user_data.clear()
     return ConversationHandler.END
 
-# 4. دالة الإلغاء في حال أراد المستخدم التراجع
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("تم إلغاء العملية.")
-    return ConversationHandler.END
-
-# --- رسالة التشغيل التلقائية ---
-async def post_init(application: ApplicationBuilder):
-    if ADMIN_ID:
-        try:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="🟢 السيرفر متصل! البوت جاهز للعمل يا نجم الإبداع.")
-        except Exception as e:
-            logging.error(f"لم أتمكن من إرسال رسالة البدء: {e}")
-
-# --- إعداد وتشغيل البوت ---
 def run_bot():
-    if not BOT_TOKEN:
-        logging.error("BOT_TOKEN is missing!")
-        return
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # إنشاء حلقة أحداث جديدة للخيط الفرعي
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # بناء التطبيق مع دالة البدء (post_init)
-    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-    
-    # إعداد مدير المحادثة
-    conv_handler = ConversationHandler(
+    conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^نجم نشر$"), start_publish)],
         states={
             WAITING_FOR_VIDEO: [MessageHandler(filters.VIDEO, receive_video)],
             WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)]
         },
-        fallbacks=[MessageHandler(filters.Regex("^الغاء$"), cancel)]
+        fallbacks=[]
     )
     
-    application.add_handler(conv_handler)
-    logging.info("Bot is starting polling...")
-    
-    # الحل السحري لمشكلة الخيوط (stop_signals=None)
-    application.run_polling(drop_pending_updates=True, stop_signals=None)
+    app_bot.add_handler(conv)
+    app_bot.add_handler(CommandHandler("login", login_tiktok))
+    app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
 
 if __name__ == '__main__':
-    # تشغيل البوت في مسار منفصل لكي لا يوقف سيرفر Flask
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
-    
-    # تشغيل سيرفر Flask على المسار الرئيسي
+    threading.Thread(target=send_pulse, daemon=True).start()
+    threading.Thread(target=run_bot).start()
     run_flask()
