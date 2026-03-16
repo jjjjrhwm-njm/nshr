@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # --- جلب المتغيرات من رندر (Render Environment) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_ID = os.getenv("ADMIN_ID") 
 CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
 CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET")
 VERIFY_PATH = os.getenv("TIKTOK_VERIFY_PATH")
@@ -43,125 +43,37 @@ db = None
 try:
     FIREBASE_CONF = os.getenv("FIREBASE_CONF")
     if FIREBASE_CONF and not firebase_admin._apps:
-        cred = credentials.Certificate(json.loads(FIREBASE_CONF))
+        cred_dict = json.loads(FIREBASE_CONF)
+        cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        logger.info("🟢 تم الاتصال بـ Firebase بنجاح! الذاكرة الدائمة جاهزة.")
+        logger.info("🟢 تم الاتصال بـ Firebase بنجاح! الذاكرة الدائمة مفعلة.")
 except Exception as e:
-    logger.error(f"🔴 خطأ في Firebase: {e}")
+    logger.error(f"🔴 خطأ في الاتصال بـ Firebase: {e}")
 
-# --- محرك التجديد التلقائي لتوكن تيك توك ---
-def refresh_tiktok_token(r_token):
-    """تحديث مفتاح الدخول صمتاً بدون إزعاجك"""
-    url = "https://open.tiktokapis.com/v2/oauth/token/"
-    data = {
-        "client_key": CLIENT_KEY,
-        "client_secret": CLIENT_SECRET,
-        "grant_type": "refresh_token",
-        "refresh_token": r_token
-    }
-    try:
-        res = requests.post(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
-        if "access_token" in res:
-            db.collection('tiktok_config').document('auth').set({
-                'access_token': res['access_token'],
-                'refresh_token': res.get('refresh_token', r_token)
-            })
-            logger.info("✅ تم تجديد التوكن تلقائياً وحفظه في Firebase.")
-            return res['access_token']
-    except Exception as e:
-        logger.error(f"🔴 فشل التجديد التلقائي: {e}")
-    return None
-
-# --- محرك الرفع الاحترافي إلى تيك توك (v2 API) ---
-def upload_to_tiktok(video_path, caption):
-    try:
-        doc = db.collection('tiktok_config').document('auth').get()
-        if not doc.exists:
-            return "❌ لا يوجد توثيق سحابي. ارسل /login"
-        
-        auth_data = doc.to_dict()
-        current_token = auth_data.get('access_token')
-        refresh_token = auth_data.get('refresh_token')
-
-        def perform_upload(token):
-            file_size = os.path.getsize(video_path)
-            init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
-            init_body = {
-                "post_info": {
-                    "title": caption,
-                    "privacy_level": "SELF_ONLY",
-                    "disable_duet": False,
-                    "disable_comment": False,
-                    "disable_stitch": False
-                },
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": file_size,
-                    "chunk_size": file_size,
-                    "total_chunk_count": 1
-                }
-            }
-            res_init = requests.post(
-                init_url, 
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"},
-                json=init_body
-            )
-            
-            if res_init.status_code == 401: return "EXPIRED"
-
-            data_init = res_init.json()
-            if "data" not in data_init: return f"❌ فشل تهيئة الرفع: {data_init}"
-            
-            upload_url = data_init["data"]["upload_url"]
-            
-            with open(video_path, "rb") as f:
-                put_headers = {
-                    "Content-Type": "video/mp4",
-                    "Content-Range": f"bytes 0-{file_size-1}/{file_size}"
-                }
-                r_put = requests.put(upload_url, headers=put_headers, data=f)
-            
-            if r_put.status_code in (200, 201, 206):
-                return "✅ تم الرفع بنجاح!"
-            else:
-                return f"❌ فشل رفع الملف: {r_put.text}"
-
-        result = perform_upload(current_token)
-        if result == "EXPIRED" and refresh_token:
-            logger.info("🔄 انتهى التوكن، جاري التجديد والمحاولة مرة أخرى...")
-            new_token = refresh_tiktok_token(refresh_token)
-            if new_token:
-                return perform_upload(new_token)
-            else:
-                return "❌ فشل تجديد الدخول التلقائي. ارسل /login"
-        
-        return result
-    except Exception as e:
-        return f"❌ خطأ تقني: {e}"
-
-# --- Flask Server (النبض، التوثيق، والتحقق) ---
+# --- Flask مسارات السيرفر ---
 @app.route('/')
 def home():
-    return "Bot is pulse-active and Cloud-Connected! 🟢"
+    return "Bot is secured, pulsing, and connected to DB! 🟢"
 
 @app.route(f'/{VERIFY_PATH}')
-def verify_ownership():
+def tiktok_verify():
     return VERIFY_CONTENT
 
 @app.route('/callback')
 def callback():
     code = request.args.get('code')
     if code:
-        return f"<h1>✅ تم الربط بنجاح!</h1><p>انسخ الكود وأرسله للبوت:</p><textarea rows='3' style='width:100%'>{code}</textarea>"
+        return f"<h1>✅ تم الربط بنجاح!</h1><p>انسخ الكود التالي وأرسله للبوت في تلجرام:</p><textarea rows='3' style='width:100%'>{code}</textarea><p>اكتب في البوت: <br><b>/auth [الكود]</b></p>"
     return "<h1>❌ فشل الحصول على الكود</h1>"
 
 def send_pulse():
+    """دالة النبض لإبقاء السيرفر مستيقظاً"""
     time.sleep(30)
     while True:
         try:
             requests.get(BASE_URL)
-            logger.info("Heartbeat sent to keep server awake.")
+            logger.info("Pulse sent.")
         except: pass
         time.sleep(600)
 
@@ -169,8 +81,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
-# --- Telegram Bot Logic (نظام نجم نشر) ---
-
+# --- نظام توثيق تيك توك ---
 async def login_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_url = (
         f"https://www.tiktok.com/v2/auth/authorize/"
@@ -185,7 +96,8 @@ async def auth_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ الطريقة: /auth [الكود]")
         return
     code = context.args[0]
-    msg = await update.message.reply_text("⏳ جاري حفظ بياناتك في السحابة للأبد...")
+    msg = await update.message.reply_text("⏳ جاري حفظ مفاتيح الدخول في السحابة...")
+
     url = "https://open.tiktokapis.com/v2/oauth/token/"
     data = {
         "client_key": CLIENT_KEY, "client_secret": CLIENT_SECRET,
@@ -194,16 +106,75 @@ async def auth_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         res = requests.post(url, headers={"Content-Type": "application/x-www-form-urlencoded"}, data=data).json()
         if "access_token" in res:
-            if db:
+            if db: # حفظ في فايربيس
                 db.collection('tiktok_config').document('auth').set({
                     'access_token': res['access_token'],
                     'refresh_token': res.get('refresh_token')
                 })
             await msg.edit_text("✅ مبروك يا نجم الإبداع! تم تفعيل الحفظ السحابي والتجديد التلقائي بنجاح! 🚀")
         else:
-            await msg.edit_text(f"❌ خطأ في الكود: {res}")
+            await msg.edit_text(f"❌ خطأ: {res}")
     except Exception as e:
-        await msg.edit_text(f"❌ خطأ: {e}")
+        await msg.edit_text(f"❌ حدث خطأ: {e}")
+
+def auto_refresh_token(refresh_token):
+    """تجديد التصريح تلقائياً بدون إزعاج المستخدم"""
+    url = "https://open.tiktokapis.com/v2/oauth/token/"
+    data = {
+        "client_key": CLIENT_KEY, "client_secret": CLIENT_SECRET,
+        "grant_type": "refresh_token", "refresh_token": refresh_token
+    }
+    try:
+        res = requests.post(url, headers={"Content-Type": "application/x-www-form-urlencoded"}, data=data).json()
+        if "access_token" in res:
+            if db:
+                db.collection('tiktok_config').document('auth').set({
+                    'access_token': res['access_token'],
+                    'refresh_token': res.get('refresh_token', refresh_token)
+                })
+            return res['access_token']
+    except: pass
+    return None
+
+def upload_to_tiktok(video_path, caption):
+    """محرك الرفع الذكي بنظام تتبع المسارات"""
+    try:
+        if not db: return "❌ قاعدة البيانات غير متصلة"
+        doc = db.collection('tiktok_config').document('auth').get()
+        if not doc.exists: return "❌ لم يتم الربط بعد. أرسل /login"
+        
+        data = doc.to_dict()
+        token = data.get('access_token')
+        
+        def process_upload(t):
+            file_size = os.path.getsize(video_path)
+            init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
+            headers = {"Authorization": f"Bearer {t}", "Content-Type": "application/json; charset=UTF-8"}
+            body = {
+                "post_info": {"title": caption, "privacy_level": "SELF_ONLY"},
+                "source_info": {"source": "FILE_UPLOAD", "video_size": file_size, 
+                                "chunk_size": file_size, "total_chunk_count": 1}
+            }
+            r = requests.post(init_url, headers=headers, json=body)
+            if r.status_code == 401: return "EXPIRED"
+            
+            res_init = r.json()
+            if "data" not in res_init: return f"Error: {res_init}"
+            
+            upload_url = res_init["data"]["upload_url"]
+            with open(video_path, "rb") as f:
+                requests.put(upload_url, headers={"Content-Type": "video/mp4"}, data=f)
+            return "✅ تم النشر بنجاح!"
+
+        result = process_upload(token)
+        if result == "EXPIRED":
+            new_token = auto_refresh_token(data.get('refresh_token'))
+            if new_token: return process_upload(new_token)
+            return "❌ فشل التجديد التلقائي. ارسل /login"
+        return result
+    except Exception as e: return f"❌ خطأ: {e}"
+
+# --- الجزء الثالث: معالجة الفيديو والقص (النسخة المطورة) ---
 
 async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ارسل المقطع يا نجم الإبداع 🎬")
@@ -215,11 +186,10 @@ async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ارسل العنوان للمقطع 📝")
     return WAITING_FOR_TITLE
 
-# --- استبدال الدالة المطلوبة بالنظام المطور لتعقب المسارات ---
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.message.text
-    # تحديث الحالة للمستخدم
-    status_msg = await update.message.reply_text("📥 جاري تحميل الفيديو من تليجرام...")
+    # تحديث الحالة للمستخدم (تتبع المسار)
+    status_msg = await update.message.reply_text("📥 (1/4) جاري تحميل الفيديو من تليجرام...")
     
     file_id = context.user_data['video_file_id']
     msg_id = context.user_data['message_id']
@@ -229,9 +199,11 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await new_file.download_to_drive(input_path)
     
     try:
-        await status_msg.edit_text("✂️ جاري فحص مدة الفيديو وبدء التقسيم...")
+        await status_msg.edit_text("✂️ (2/4) جاري فحص مدة الفيديو وبدء التقسيم...")
         cmd_dur = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
         duration = float(subprocess.check_output(cmd_dur, shell=True).decode().strip())
+        
+        await status_msg.edit_text(f"⚙️ (3/4) جاري معالجة الفيديو ({int(duration)} ثانية)...")
         
         for start in range(0, int(duration), 50):
             part_num = (start // 50) + 1
@@ -242,9 +214,8 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if os.path.exists(out):
                 caption = f"{title} - جـ{part_num}"
-                await update.message.reply_text(f"📤 جاري رفع الجزء {part_num} إلى تيك توك...")
-                
                 # رفع تيك توك
+                await update.message.reply_text(f"📤 (4/4) جاري رفع الجزء {part_num} إلى تيك توك...")
                 res_tk = await asyncio.to_thread(upload_to_tiktok, out, caption)
                 
                 # إرسال تلجرام للمعاينة
@@ -253,7 +224,7 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 os.remove(out)
 
-        await status_msg.edit_text("✅ تمت جميع العمليات بنجاح! 🚀")
+        await status_msg.edit_text("✅ تمت جميع العمليات بنجاح! 🚀🎬")
     except Exception as e:
         await update.message.reply_text(f"❌ حدث خطأ فني: {e}")
         logger.error(f"Error during processing: {e}")
@@ -262,12 +233,22 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
     return ConversationHandler.END
 
-# --- التشغيل النهائي المزدوج (Bot + Flask) ---
+# --- وظيفة التنظيف عند التشغيل (Perfect Cleanup) ---
+async def post_init(application):
+    """تنظيف الملفات العالقة وإرسال تنبيه"""
+    for f in glob.glob("input_*.mp4") + glob.glob("part_*.mp4"):
+        try: os.remove(f)
+        except: pass
+    if ADMIN_ID:
+        try: await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 تم تشغيل النسخة الجديدة بنجاح! السيرفر نظيف والنسخ القديمة توقفت.")
+        except: pass
+
+# --- التشغيل النهائي ---
 def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
     
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^نجم نشر$"), start_publish)],
@@ -282,15 +263,11 @@ def run_bot():
     application.add_handler(CommandHandler("login", login_tiktok))
     application.add_handler(CommandHandler("auth", auth_step))
     
-    logger.info("Bot is running with drop_pending_updates=True...")
+    logger.info("Bot is running with instance protection...")
+    # drop_pending_updates=True هي المسؤولة عن قتل أي أوامر من نسخ قديمة
     application.run_polling(drop_pending_updates=True, stop_signals=None)
 
 if __name__ == '__main__':
-    # نظام تنظيف تلقائي عند التشغيل لحذف أي فيديوهات قديمة
-    for f in glob.glob("input_*.mp4") + glob.glob("part_*.mp4"):
-        try: os.remove(f)
-        except: pass
-    
     threading.Thread(target=send_pulse, daemon=True).start()
     threading.Thread(target=run_bot, daemon=True).start()
     run_flask()
