@@ -7,6 +7,7 @@ import time
 import requests
 import json
 import glob
+import ast
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,11 +17,11 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# إعداد السجلات لتتبع المسارات باحترافية
+# إعداد السجلات
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- المتغيرات من رندر ---
+# --- المتغيرات الأساسية ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
@@ -30,27 +31,32 @@ REDIRECT_URI = f"{BASE_URL}/callback"
 VERIFY_PATH = os.getenv("TIKTOK_VERIFY_PATH")
 VERIFY_CONTENT = os.getenv("TIKTOK_VERIFY_CONTENT")
 
-# عزل البيانات لحماية البوتات الأخرى
-FS_COLLECTION = "Najm_Nshr_Data" 
-FS_DOCUMENT = "auth_info"
+FS_COLLECTION = "nshr_bot_metadata" 
+FS_DOCUMENT = "tiktok_auth"
 
 WAITING_FOR_VIDEO, WAITING_FOR_TITLE = range(2)
 app = Flask(__name__)
 
-# --- تهيئة فايربيس الآمنة ---
+# --- تهيئة فايربيس القوية (مع حل مشكلة رندر) ---
 db = None
 try:
-    conf_json = os.getenv("FIREBASE_CONF")
-    if conf_json:
+    FIREBASE_CONF_STR = os.getenv("FIREBASE_CONF")
+    if FIREBASE_CONF_STR:
+        try: cred_dict = json.loads(FIREBASE_CONF_STR)
+        except json.JSONDecodeError: cred_dict = ast.literal_eval(FIREBASE_CONF_STR)
+        
+        if "private_key" in cred_dict:
+            cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
+            
         if not firebase_admin._apps:
-            cred = credentials.Certificate(json.loads(conf_json))
+            cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
         db = firestore.client()
-        logger.info("🟢 Firebase connected successfully.")
+        logger.info("🟢 Firebase connected perfectly.")
 except Exception as e:
-    logger.error(f"🔴 Firebase Connection Error: {e}")
+    logger.error(f"🔴 Firebase Error: {e}")
 
-# --- محرك التجديد التلقائي لتوكن تيك توك ---
+# --- تجديد التوكن ---
 def refresh_tiktok_token(r_token):
     url = "https://open.tiktokapis.com/v2/oauth/token/"
     data = {"client_key": CLIENT_KEY, "client_secret": CLIENT_SECRET, "grant_type": "refresh_token", "refresh_token": r_token}
@@ -65,12 +71,12 @@ def refresh_tiktok_token(r_token):
     except: pass
     return None
 
-# --- محرك الرفع الاحترافي ---
+# --- محرك الرفع ---
 def upload_to_tiktok(video_path, caption):
     try:
-        if not db: return "❌ قاعدة البيانات غير متصلة."
+        if not db: return "❌ قاعدة البيانات مفصولة."
         doc = db.collection(FS_COLLECTION).document(FS_DOCUMENT).get()
-        if not doc.exists: return "❌ لا يوجد توثيق. ارسل /login"
+        if not doc.exists: return "❌ لا يوجد توثيق."
         
         auth_data = doc.to_dict()
         token = auth_data.get('access_token')
@@ -86,7 +92,7 @@ def upload_to_tiktok(video_path, caption):
             if res_init.status_code == 401: return "EXPIRED"
             
             data_init = res_init.json()
-            if "data" not in data_init: return f"❌ فشل التهيئة: {data_init}"
+            if "data" not in data_init: return f"❌ فشل التهيئة."
             
             upload_url = data_init["data"]["upload_url"]
             with open(video_path, "rb") as f:
@@ -102,7 +108,7 @@ def upload_to_tiktok(video_path, caption):
 
 # --- Flask Server ---
 @app.route('/')
-def home(): return "Bot Safe & Pulsing! 🟢"
+def home(): return "Bot is Live! 🟢"
 
 @app.route(f'/{VERIFY_PATH}')
 def verify(): return VERIFY_CONTENT
@@ -119,29 +125,29 @@ def send_pulse():
         except: pass
         time.sleep(600)
 
-# --- Telegram Bot Logic ---
-
+# --- أوامر التليجرام (الترتيب الذي طلبته بالضبط) ---
 async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db:
-        await update.message.reply_text("❌ البوت غير متصل بـ Firebase. تأكد من إعدادات رندر.")
+        await update.message.reply_text("❌ البوت غير متصل بقاعدة البيانات. راجع السجلات.")
         return ConversationHandler.END
         
     doc = db.collection(FS_COLLECTION).document(FS_DOCUMENT).get()
     if doc.exists:
-        await update.message.reply_text("✅ حساب تيك توك (محفوظ) سحابياً وجاهز.\nالآن، ارسل المقطع المراد نشره 🎬")
+        await update.message.reply_text("ارسل المقطع 🎬")
         return WAITING_FOR_VIDEO
     else:
-        await update.message.reply_text("⚠️ حسابك غير مسجل حالياً. يرجى إرسال /login للربط.")
+        await update.message.reply_text("⚠️ أنت غير مسجل الدخول في تيك توك. يرجى إرسال /login أولاً.")
         return ConversationHandler.END
 
 async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['v_id'] = update.message.video.file_id
-    await update.message.reply_text("تم استلام الفيديو! الآن أرسل (عنوان المقطع) 📝")
+    await update.message.reply_text("ارسل العنوان 📝")
     return WAITING_FOR_TITLE
 
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     original_title = update.message.text
-    status_msg = await update.message.reply_text("📥 (1/4) جاري تحميل الفيديو من تليجرام...")
+    # رسالة تحديث واحدة فقط حتى لا تزعج الشات
+    status_msg = await update.message.reply_text("📥 جاري تحميل المقطع من تليجرام...")
     
     file_id = context.user_data['v_id']
     input_path = f"input_{update.message.message_id}.mp4"
@@ -150,45 +156,54 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_file = await context.bot.get_file(file_id)
         await new_file.download_to_drive(input_path)
         
-        await status_msg.edit_text("🔍 (2/4) تم التحميل. جاري فحص مدة المقطع للتقسيم...")
+        await status_msg.edit_text("🔍 تم التحميل! جاري فحص وتقسيم المقطع...")
         duration = float(subprocess.check_output(f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}", shell=True).decode().strip())
         
-        # التقسيم كل 50 ثانية
         for start in range(0, int(duration), 50):
             part_num = (start // 50) + 1
             out = f"part_{part_num}_{update.message.message_id}.mp4"
             
-            # تنسيق العنوان الآلي كما طلبت
-            caption = f"{original_title} (الجزء{part_num})"
+            # الإضافة التلقائية للعنوان
+            caption = f"{original_title} (الجزء {part_num})"
             
-            await status_msg.edit_text(f"✂️ (3/4) جاري الآن قص {caption}...")
+            await status_msg.edit_text(f"✂️ جاري قص: {caption}...")
             subprocess.run(f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {out}', shell=True)
             
             if os.path.exists(out):
-                await update.message.reply_text(f"📤 (4/4) جاري رفع {caption} إلى تيك توك...")
+                await status_msg.edit_text(f"📤 جاري رفع: {caption} إلى تيك توك...")
                 res_tk = await asyncio.to_thread(upload_to_tiktok, out, caption)
                 
+                # إرسال المقطع للتأكيد لك
                 with open(out, 'rb') as v:
-                    await update.message.reply_video(video=v, caption=f"✅ {caption}\n📊 نتيجة النشر: {res_tk}")
+                    await update.message.reply_video(video=v, caption=f"✅ {caption}\n📊 الحالة: {res_tk}")
                 os.remove(out)
 
-        await status_msg.edit_text("🎉 تمت جميع العمليات بنجاح وتم النشر السحابي!")
+        await status_msg.edit_text("🎉 مبروك! تمت جميع العمليات وتم النشر بنجاح.")
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ أثناء المعالجة: {e}")
+        await update.message.reply_text(f"❌ حدث خطأ فني: {e}")
     finally:
         if os.path.exists(input_path): os.remove(input_path)
         context.user_data.clear()
     return ConversationHandler.END
 
+# --- رسالة الإقلاع الذكية للمطور ---
 async def post_init(application):
-    """تنظيف شامل عند كل إقلاع للبوت"""
     for f in glob.glob("*.mp4"):
         try: os.remove(f)
         except: pass
+        
     if ADMIN_ID:
-        try: await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 البوت اشتغل بنسخته النهائية.\n✅ السيرفر نظيف.\n✅ حماية Firebase معزولة.")
+        if db:
+            doc = db.collection(FS_COLLECTION).document(FS_DOCUMENT).get()
+            tiktok_status = "✅ مسجل الدخول وجاهز للنشر" if doc.exists else "⚠️ غير مسجل! ارسل /login للربط"
+            msg = f"🚀 اشتغل البوت بنجاح!\n\n🗄️ قاعدة البيانات: متصلة ✅\n🎵 تيك توك: {tiktok_status}"
+        else:
+            msg = "🚀 اشتغل البوت، لكن:\n\n🗄️ قاعدة البيانات: مفصولة ❌ (يوجد خطأ في كود Firebase في رندر)"
+            
+        try: await application.bot.send_message(chat_id=ADMIN_ID, text=msg)
         except: pass
 
+# --- التشغيل ---
 if __name__ == '__main__':
     threading.Thread(target=send_pulse, daemon=True).start()
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)), use_reloader=False), daemon=True).start()
@@ -198,12 +213,15 @@ if __name__ == '__main__':
     bot.add_handler(CommandHandler("login", lambda u, c: u.message.reply_text("رابط التوثيق:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ربط حساب تيك توك", url=f"https://www.tiktok.com/v2/auth/authorize/?client_key={CLIENT_KEY}&scope=user.info.basic,video.upload,video.publish&response_type=code&redirect_uri={REDIRECT_URI}")]]))))
     
     async def auth_final(u, c):
+        if not db:
+            await u.message.reply_text("❌ البوت غير متصل بقاعدة البيانات.")
+            return
         if not c.args: return
         res = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": CLIENT_KEY, "client_secret": CLIENT_SECRET, "code": c.args[0], "grant_type": "authorization_code", "redirect_uri": REDIRECT_URI}, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
         if "access_token" in res:
             db.collection(FS_COLLECTION).document(FS_DOCUMENT).set({'access_token': res['access_token'], 'refresh_token': res.get('refresh_token')})
-            await u.message.reply_text("✅ تم الربط والحفظ السحابي بنجاح!")
-        else: await u.message.reply_text(f"❌ خطأ في الكود.")
+            await u.message.reply_text("✅ تم الربط! حسابك الآن محفوظ للأبد.")
+        else: await u.message.reply_text("❌ كود خاطئ أو منتهي الصلاحية.")
     
     bot.add_handler(CommandHandler("auth", auth_final))
     bot.add_handler(ConversationHandler(
@@ -214,5 +232,4 @@ if __name__ == '__main__':
         }, fallbacks=[]
     ))
     
-    # drop_pending_updates=True تضمن عدم تصادم النسخ القديمة
     bot.run_polling(drop_pending_updates=True)
