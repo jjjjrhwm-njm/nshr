@@ -1,8 +1,8 @@
-python-telegram-bot==20.8
+pyrogram==2.0.106
+tgcrypto==1.2.5
 requests==2.31.0
 python-dotenv==1.0.0
 Flask==3.0.0
 gunicorn==21.2.0
-yt-dlp
-arabic-reshaper
-python-bidi
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
