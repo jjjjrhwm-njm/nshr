@@ -5,159 +5,175 @@ import asyncio
 import threading
 import time
 import requests
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import yt_dlp
+import arabic_reshaper
+from bidi.algorithm import get_display
+from flask import Flask
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, MessageHandler, filters,
-    ConversationHandler, CommandHandler
+    ConversationHandler
 )
 
-# إعداد السجلات
+# --- إعداد السجلات لمتابعة عمل السيرفر ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- المتغيرات الأساسية ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY")
-CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET")
 BASE_URL = os.getenv("BASE_URL", "https://nshr-6u7f.onrender.com")
-REDIRECT_URI = f"{BASE_URL}/callback"
-VERIFY_PATH = os.getenv("TIKTOK_VERIFY_PATH")
-VERIFY_CONTENT = os.getenv("TIKTOK_VERIFY_CONTENT")
 
-WAITING_FOR_VIDEO, WAITING_FOR_TITLE = range(2)
+WAITING_FOR_URL, WAITING_FOR_TITLE = range(2)
 app = Flask(__name__)
 
-# ذاكرة مؤقتة لاختبار الرفع
-memory_db = {"access_token": None, "refresh_token": None}
+# --- تحميل الخط العربي تلقائياً (لكتابة العنوان على الفيديو) ---
+FONT_FILE = "font.ttf"
+def download_font():
+    if not os.path.exists(FONT_FILE):
+        logger.info("جاري تحميل الخط العربي...")
+        font_url = "https://github.com/google/fonts/raw/main/ofl/cairo/Cairo-Bold.ttf"
+        try:
+            with open(FONT_FILE, 'wb') as f:
+                f.write(requests.get(font_url).content)
+        except Exception as e:
+            logger.error(f"خطأ في تحميل الخط: {e}")
 
-# --- محرك الرفع الاحترافي لتيك توك ---
-def upload_to_tiktok(video_path, caption):
-    try:
-        token = memory_db.get("access_token")
-        if not token: return "❌ لا يوجد توثيق. ارسل /login"
+download_font()
 
-        file_size = os.path.getsize(video_path)
-        init_url = "https://open.tiktokapis.com/v2/post/publish/video/init/"
-        init_body = {
-            "post_info": {"title": caption, "privacy_level": "SELF_ONLY"},
-            "source_info": {"source": "FILE_UPLOAD", "video_size": file_size, "chunk_size": file_size, "total_chunk_count": 1}
-        }
-        res_init = requests.post(init_url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=init_body)
-        
-        if res_init.status_code == 401: return "❌ انتهت صلاحية التوكن (EXPIRED). يرجى التوثيق مجدداً."
-        
-        data_init = res_init.json()
-        if "data" not in data_init: return f"❌ فشل التهيئة: {data_init}"
-        
-        upload_url = data_init["data"]["upload_url"]
-        with open(video_path, "rb") as f:
-            headers_put = {"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{file_size-1}/{file_size}"}
-            r_put = requests.put(upload_url, headers=headers_put, data=f)
-        
-        return "✅ تم الرفع بنجاح!" if r_put.status_code in (200, 201, 206) else f"❌ فشل الرفع: {r_put.text}"
-    except Exception as e: return f"❌ خطأ تقني: {e}"
-
-# --- Flask Server ---
+# --- Flask Server (لإبقاء رندر متيقظاً 24 ساعة) ---
 @app.route('/')
-def home(): return "Bot is Live! 🟢"
-
-@app.route(f'/{VERIFY_PATH}')
-def verify(): return VERIFY_CONTENT
-
-@app.route('/callback')
-def callback():
-    code = request.args.get('code')
-    return f"<h1>✅ تم الربط!</h1><textarea rows='3' style='width:100%'>{code}</textarea>" if code else "Error"
+def home():
+    return "Montage Bot is Live and Clean! 🟢"
 
 def send_pulse():
     time.sleep(30)
     while True:
-        try: requests.get(BASE_URL)
-        except: pass
+        try:
+            requests.get(BASE_URL)
+        except:
+            pass
         time.sleep(600)
 
-# --- أوامر التليجرام والنشر ---
-async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not memory_db["access_token"]:
-        await update.message.reply_text("⚠️ أنت غير مسجل الدخول في تيك توك. يرجى إرسال /login أولاً للتوثيق.")
-        return ConversationHandler.END
-        
-    await update.message.reply_text("ارسل المقطع 🎬")
-    return WAITING_FOR_VIDEO
+# --- معالجة النص العربي ليظهر متصلاً وصحيحاً في المونتاج ---
+def prepare_arabic_text(text):
+    reshaped_text = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped_text)
+    return bidi_text
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['v_id'] = update.message.video.file_id
-    await update.message.reply_text("ارسل العنوان 📝")
+# --- أوامر التليجرام ونظام المونتاج ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 تم الإلغاء بنجاح. تم تنظيف ذاكرة البوت بالكامل.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def start_publish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "الغاء":
+        return await cancel(update, context)
+        
+    await update.message.reply_text("🔗 أهلاً بك في مصنع المونتاج!\n\nأرسل لي **رابط الفيديو** الآن..\n\n*(أو أرسل `الغاء` للإيقاف في أي وقت)*", parse_mode="Markdown")
+    return WAITING_FOR_URL
+
+async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "الغاء":
+        return await cancel(update, context)
+    
+    context.user_data['v_url'] = text
+    await update.message.reply_text("📝 ممتاز! أرسل لي **عنوان المقطع** الآن:\n*(مثال: فيلم السهرة)*\n\n*(أو أرسل `الغاء`)*", parse_mode="Markdown")
     return WAITING_FOR_TITLE
 
-async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    original_title = update.message.text
-    status_msg = await update.message.reply_text("📥 جاري تحميل المقطع من تليجرام...")
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "الغاء":
+        return await cancel(update, context)
     
-    file_id = context.user_data['v_id']
+    original_title = text
+    video_url = context.user_data['v_url']
+    status_msg = await update.message.reply_text("📥 جاري سحب الفيديو من الرابط... (الرجاء الانتظار)")
+    
     input_path = f"input_{update.message.message_id}.mp4"
     
     try:
-        new_file = await context.bot.get_file(file_id)
-        await new_file.download_to_drive(input_path)
+        # 1. تحميل الفيديو بأسرع طريقة ممكنة
+        ydl_opts = {'outtmpl': input_path, 'format': 'best'}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            await asyncio.to_thread(ydl.download, [video_url])
+            
+        await status_msg.edit_text("🔍 تم السحب بنجاح! جاري حساب المدة وبدء المونتاج الآلي...")
         
-        await status_msg.edit_text("🔍 تم التحميل! جاري فحص وتقسيم المقطع...")
-        duration = float(subprocess.check_output(f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}", shell=True).decode().strip())
+        # 2. استخراج مدة الفيديو الكلية
+        duration_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {input_path}"
+        duration_str = subprocess.check_output(duration_cmd, shell=True).decode().strip()
+        duration = float(duration_str)
         
+        # 3. التقسيم كل 50 ثانية والكتابة على الفيديو
         for start in range(0, int(duration), 50):
             part_num = (start // 50) + 1
-            out = f"part_{part_num}_{update.message.message_id}.mp4"
+            out_file = f"part_{part_num}_{update.message.message_id}.mp4"
             
-            # الإضافة التلقائية للعنوان
-            caption = f"{original_title} (الجزء {part_num})"
+            # تجهيز العنوان مع رقم الجزء (مثال: فيلم السهرة (الجزء 1))
+            raw_title = f"{original_title} (الجزء {part_num})"
+            arabic_ready_text = prepare_arabic_text(raw_title)
+            # حماية الكود من الرموز الخاصة في العنوان
+            safe_text = arabic_ready_text.replace("'", "\\'").replace(":", "\\:")
             
-            await status_msg.edit_text(f"✂️ جاري قص: {caption}...")
-            subprocess.run(f'ffmpeg -ss {start} -t 50 -i {input_path} -c copy -y {out}', shell=True)
+            await status_msg.edit_text(f"✂️ ✍️ جاري دمج وكتابة: '{raw_title}'\n*(عملية المونتاج تحتاج وقت، اترك البوت يعمل براحته)*...")
             
-            if os.path.exists(out):
-                await status_msg.edit_text(f"📤 جاري رفع: {caption} إلى تيك توك...")
-                # الرفع لتيك توك
-                res_tk = await asyncio.to_thread(upload_to_tiktok, out, caption)
+            # أمر ffmpeg للقص السريع وكتابة النص باللون الأحمر في أعلى المنتصف
+            ffmpeg_cmd = (
+                f'ffmpeg -ss {start} -t 50 -i {input_path} '
+                f'-vf "drawtext=fontfile={FONT_FILE}:text=\'{safe_text}\':fontcolor=red:fontsize=w/15:x=(w-text_w)/2:y=50" '
+                f'-c:v libx264 -preset ultrafast -crf 28 -c:a aac -y {out_file}'
+            )
+            subprocess.run(ffmpeg_cmd, shell=True)
+            
+            # 4. إرسال المقطع الجاهز ثم حذفه فوراً من السيرفر (Garbage Collection)
+            if os.path.exists(out_file):
+                await status_msg.edit_text(f"📤 جاري إرسال (الجزء {part_num}) إليك...")
+                with open(out_file, 'rb') as v:
+                    await update.message.reply_video(video=v, caption=f"✅ {raw_title}")
                 
-                # إرسال المقطع للتأكيد
-                with open(out, 'rb') as v:
-                    await update.message.reply_video(video=v, caption=f"✅ {caption}\n📊 الحالة: {res_tk}")
-                os.remove(out)
+                # مسح الجزء بعد إرساله لتنظيف ذاكرة السيرفر
+                os.remove(out_file)
 
-        await status_msg.edit_text("🎉 مبروك! تمت جميع العمليات وتم النشر بنجاح.")
+        await status_msg.edit_text("🎉 مبروك! تمت جميع عمليات المونتاج والإرسال بنجاح، وتم تنظيف السيرفر بالكامل.")
+        
     except Exception as e:
-        await update.message.reply_text(f"❌ حدث خطأ فني: {e}")
+        await update.message.reply_text(f"❌ حدث خطأ فني أثناء المعالجة: {e}")
     finally:
-        if os.path.exists(input_path): os.remove(input_path)
+        # الكنس النهائي: مسح المقطع الأساسي الكبير في كل الحالات (سواء نجح أو فشل)
+        if os.path.exists(input_path):
+            os.remove(input_path)
         context.user_data.clear()
+        
     return ConversationHandler.END
 
-# --- التشغيل ---
+# --- التشغيل الأساسي للبوت ---
 if __name__ == '__main__':
+    # تشغيل النبض لضمان بقاء السيرفر
     threading.Thread(target=send_pulse, daemon=True).start()
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)), use_reloader=False), daemon=True).start()
+    port = int(os.environ.get("PORT", 10000))
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, use_reloader=False), daemon=True).start()
     
+    # بناء البوت
     bot = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    bot.add_handler(CommandHandler("login", lambda u, c: u.message.reply_text("رابط التوثيق:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ربط حساب تيك توك", url=f"https://www.tiktok.com/v2/auth/authorize/?client_key={CLIENT_KEY}&scope=user.info.basic,video.upload,video.publish&response_type=code&redirect_uri={REDIRECT_URI}")]]))))
+    # فلتر عام لالتقاط كلمة "الغاء"
+    cancel_filter = filters.Regex("^الغاء$")
     
-    async def auth_final(u, c):
-        if not c.args: return
-        res = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": CLIENT_KEY, "client_secret": CLIENT_SECRET, "code": c.args[0], "grant_type": "authorization_code", "redirect_uri": REDIRECT_URI}, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()
-        if "access_token" in res:
-            memory_db["access_token"] = res['access_token']
-            memory_db["refresh_token"] = res.get('refresh_token')
-            await u.message.reply_text("✅ تم الربط مؤقتاً! جرب محرك النشر الآن.")
-        else: await u.message.reply_text(f"❌ كود خاطئ أو منتهي الصلاحية: {res}")
-    
-    bot.add_handler(CommandHandler("auth", auth_final))
-    bot.add_handler(ConversationHandler(
+    # تسلسل المحادثة
+    conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^نجم نشر$"), start_publish)],
         states={
-            WAITING_FOR_VIDEO: [MessageHandler(filters.VIDEO, receive_video)],
-            WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)]
-        }, fallbacks=[]
-    ))
+            WAITING_FOR_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url)],
+            WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_video)]
+        },
+        fallbacks=[MessageHandler(cancel_filter, cancel)]
+    )
+    
+    bot.add_handler(conv_handler)
+    # إضافة الفلتر هنا يضمن استجابة البوت للإلغاء حتى لو كان معلقاً
+    bot.add_handler(MessageHandler(cancel_filter, cancel))
     
     bot.run_polling(drop_pending_updates=True)
